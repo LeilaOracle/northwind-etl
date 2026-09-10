@@ -1,0 +1,343 @@
+services:
+
+  # ============================================================
+  # SQL SERVER
+  # ============================================================
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: northwind-sqlserver
+    hostname: sqlserver
+
+    environment:
+      MSSQL_AGENT_ENABLED: "true"
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+      MSSQL_PID: ${MSSQL_PID}
+
+    ports:
+      - "1433:1433"
+
+    volumes:
+      - sqlserver_data:/var/opt/mssql
+      - ./sqlserver/init:/docker-entrypoint-initdb.d
+
+    networks:
+      - northwind-network
+
+    restart: unless-stopped
+
+
+  # ============================================================
+  # POSTGRESQL
+  # ============================================================
+  postgres:
+    image: postgres:16
+    container_name: northwind-postgres
+    hostname: postgres
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+
+    ports:
+      - "5432:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d
+
+    networks:
+      - northwind-network
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+
+  # ============================================================
+  # AIRFLOW DATABASE INITIALIZATION
+  # ============================================================
+  airflow-init:
+   build:
+    context: ./airflow
+    dockerfile: Dockerfile
+
+   container_name: northwind-airflow-init
+
+   environment:
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${AIRFLOW_DB_NAME}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+
+   depends_on:
+    postgres:
+      condition: service_healthy
+
+   networks:
+    - northwind-network
+
+   command:
+    - bash
+    - -c
+    - |
+      airflow db migrate
+
+  # ============================================================
+  # AIRFLOW API SERVER
+  # ============================================================
+  airflow-api-server:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+
+    container_name: northwind-airflow-api-server
+
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE: 10
+      AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW: 20
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_RECYCLE: 1800
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${AIRFLOW_DB_NAME}
+
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+
+      AIRFLOW__CORE__EXECUTOR: ${AIRFLOW_EXECUTOR}
+
+      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${AIRFLOW_DB_NAME}
+
+      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+    ports:
+      - "8080:8080"
+
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+    networks:
+      - northwind-network
+
+    command:
+      - airflow
+      - api-server
+
+
+  # ============================================================
+  # AIRFLOW SCHEDULER
+  # ============================================================
+  airflow-scheduler:
+   build:
+    context: ./airflow
+    dockerfile: Dockerfile
+
+   container_name: northwind-airflow-scheduler
+
+   environment:
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${AIRFLOW_DB_NAME}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+    AIRFLOW__CORE__EXECUTOR: ${AIRFLOW_EXECUTOR}
+    AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${AIRFLOW_DB_NAME}
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE: 10
+    AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW: 20
+    AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_RECYCLE: 1800
+   volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./airflow/plugins:/opt/airflow/plugins
+
+   depends_on:
+    airflow-init:
+      condition: service_completed_successfully
+    redis:
+      condition: service_started
+
+   networks:
+    - northwind-network
+
+   command:
+    - airflow
+    - scheduler
+
+  # ============================================================
+  # AIRFLOW DAG PROCESSOR
+  # ============================================================
+  airflow-dag-processor:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+
+    container_name: northwind-airflow-dag-processor
+
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${AIRFLOW_DB_NAME}
+
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+
+      AIRFLOW__CORE__EXECUTOR: ${AIRFLOW_EXECUTOR}
+
+      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${AIRFLOW_DB_NAME}
+
+      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
+
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE: 10
+      AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW: 20
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_RECYCLE: 1800
+
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+    networks:
+      - northwind-network
+
+    command:
+      - airflow
+      - dag-processor
+  # ============================================================
+  # AIRFLOW CELERY WORKER
+  # ============================================================
+  airflow-worker:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+
+    container_name: northwind-airflow-worker
+
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${AIRFLOW_DB_NAME}
+
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+
+      AIRFLOW__CORE__EXECUTOR: ${AIRFLOW_EXECUTOR}
+
+      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${AIRFLOW_DB_NAME}
+      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE: 10
+      AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW: 20
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_RECYCLE: 1800
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+    networks:
+      - northwind-network
+
+    command:
+      - airflow
+      - celery
+      - worker
+
+
+  # ============================================================
+  # CELERY BROKER
+  # ============================================================
+  redis:
+    image: redis:7-alpine
+    container_name: northwind-redis
+    hostname: redis
+
+    networks:
+      - northwind-network
+
+    restart: unless-stopped
+
+
+  # ============================================================
+  # CLICKHOUSE
+  # ============================================================
+  clickhouse:
+   image: clickhouse/clickhouse-server:latest
+   container_name: northwind-clickhouse
+   hostname: clickhouse
+
+   ports:
+    - "8123:8123"
+    - "9000:9000"
+
+   volumes:
+    - clickhouse_data:/var/lib/clickhouse
+    - clickhouse_logs:/var/log/clickhouse-server
+    - ./clickhouse/init:/docker-entrypoint-initdb.d
+
+   networks:
+    - northwind-network
+
+   restart: unless-stopped
+
+  # ============================================================
+  # GRAFANA
+  # ============================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: northwind-grafana
+    hostname: grafana
+
+    ports:
+      - "3000:3000"
+
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+
+    networks:
+      - northwind-network
+
+    depends_on:
+      - clickhouse
+
+    restart: unless-stopped
+
+
+# ============================================================
+# NETWORK
+# ============================================================
+networks:
+
+  northwind-network:
+    name: northwind-network
+    driver: bridge
+
+
+# ============================================================
+# VOLUMES
+# ============================================================
+volumes:
+
+  sqlserver_data:
+
+  postgres_data:
+
+  clickhouse_data:
+
+  clickhouse_logs:
+
+  grafana_data:

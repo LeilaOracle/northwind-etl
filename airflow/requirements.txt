@@ -1,0 +1,7 @@
+apache-airflow-providers-postgres
+apache-airflow-providers-microsoft-mssql
+apache-airflow-providers-common-sql
+psycopg2-binary
+pyodbc
+clickhouse-connect
+pyspark

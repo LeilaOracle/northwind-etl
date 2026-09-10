@@ -1,0 +1,76 @@
+# =========================
+# Environment / Secrets
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# =========================
+# Airflow
+# =========================
+airflow/logs/
+airflow/airflow.cfg
+airflow/webserver_config.py
+
+# =========================
+# Runtime / temporary files
+# =========================
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# =========================
+# Database / local runtime data
+# =========================
+*.db
+*.sqlite
+*.sqlite3
+
+# =========================
+# Docker local data
+# =========================
+postgres/data/
+sqlserver/data/
+clickhouse/data/
+grafana/data/
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+Desktop.ini
+Zone.Identifier
+
+# =========================
+# IDE
+# =========================
+.vscode/
+.idea/
+
+# =========================
+# Backup files
+# =========================
+*.bak
+*.backup
+*.save
+*.old
+
+# =========================
+# Git
+# =========================
+.git/
