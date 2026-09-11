@@ -1,197 +1,104 @@
-# مستند فارسی پروژه Northwind ETL / Data Warehouse
+# مستند کامل پروژه Northwind ETL / Data Warehouse
+
+**نسخه:** بازنویسی نهایی با تصاویر کامل چهار Dashboard Grafana
 
 ## 1. معرفی پروژه
-
-این پروژه یک Pipeline کامل ETL/ELT برای پایگاه داده Northwind است که با Docker، Apache Airflow، PostgreSQL، SQL Server، ClickHouse و Grafana پیاده‌سازی شده است.
-
-هدف، انتقال داده‌ها از SQL Server، ایجاد لایه Staging در PostgreSQL، ساخت Data Warehouse در ClickHouse و ارائه تحلیل در Grafana است.
+این پروژه یک Pipeline کامل ETL/ELT برای Northwind است که با Docker، Apache Airflow، PostgreSQL، SQL Server، ClickHouse و Grafana پیاده‌سازی شده است. هدف، انتقال داده از SQL Server به PostgreSQL Staging، ساخت FactSales، انتقال Dimensionها به ClickHouse با SCD Type 2، اعمال CDC روی FactSales و ارائه تحلیل در Grafana است.
 
 ```text
 SQL Server / Northwind
-        │
-        │ Full Load - Daily
+        │ Daily Full Load
         ▼
 PostgreSQL / Staging
-        │
-        │ Incremental SCD Type 2
+  ├── Dimensions
+  └── FactSales
+        │ PySpark / SCD2
         ▼
 ClickHouse / Data Warehouse
+  ├── Dimensions SCD2
+  └── FactSales
         │
         ▼
-Grafana
+Grafana / Analytics
 ```
 
-مسیر CDC برای FactSales مستقل است:
-
-```text
-SQL Server CDC → CDC Raw → CDC Clean → CDC Apply → ClickHouse FactSales
-```
+مسیر CDC مستقل است:
+`SQL Server CDC → CDC Raw → CDC Clean → CDC Apply → ClickHouse FactSales`
 
 ## 2. اجزای اصلی
-
 | Component | وظیفه |
 |---|---|
-| SQL Server | Source Database |
-| PostgreSQL | Staging Database |
+| SQL Server | Source Database و محل CDC |
+| PostgreSQL | Staging و تولید FactSales |
 | Apache Airflow | Orchestration و Scheduling |
 | Celery / Redis | اجرای Taskهای Airflow |
-| ClickHouse | Data Warehouse تحلیلی |
 | PySpark | ETL و SCD Type 2 |
-| Grafana | Visualization |
+| ClickHouse | Data Warehouse تحلیلی |
+| Grafana | Visualization و Analytics |
 | Docker Compose | اجرای سرویس‌ها |
 
-## 3. لایه PostgreSQL
+## 3. PostgreSQL / Staging
+Dimensionها: `DimGeography`, `DimCustomer`, `DimEmployee`, `DimProduct`, `DimDate`, `DimCategory`, `DimSupplier`
 
-Dimensionهای اصلی:
-
-- DimGeography
-- DimCustomer
-- DimEmployee
-- DimProduct
-- DimDate
-- DimCategory
-- DimSupplier
-
-Fact:
-
-- FactSales
+Fact: `FactSales`
 
 Dimensionهای PostgreSQL به‌صورت Full Refresh از SQL Server بارگذاری می‌شوند.
 
 ## 4. DAGهای PostgreSQL
+- `etl_dim_geography.py`: استخراج و Full Refresh جغرافیا.
+- `etl_dim_customer.py`: Customer با Geography Lookup.
+- `etl_dim_employee.py`: بارگذاری Employee.
+- `etl_dim_category.py`: Full Refresh Category.
+- `etl_dimsupplier_postgres.py`: بارگذاری Supplier.
+- `etl_dim_product.py`: Product با Supplier و Category Lookup.
+- `etl_dim_date.py`: ساخت DimDate و DateKey.
 
-### etl_dim_geography.py
-استخراج Geography از SQL Server و Full Refresh جدول DimGeography.
-
-### etl_dim_customer.py
-استخراج Customer، اتصال به Geography و بارگذاری DimCustomer.
-
-Dependency:
-
+Dependencyهای اصلی:
 ```text
 DimGeography → DimCustomer
+DimCategory + DimSupplier → DimProduct
 ```
 
-### etl_dim_employee.py
-استخراج و بارگذاری DimEmployee.
-
-### etl_dim_product.py
-استخراج Product و اتصال به Supplier و Category.
+## 5. FactSales در PostgreSQL
+`etl_fact_sales.py`، Orders و Order Details را با Dimensionها ترکیب می‌کند.
 
 ```text
-DimCategory ──┐
-              ├──> DimProduct
-DimSupplier ──┘
+GrossSales     = UnitPrice × Quantity
+DiscountAmount = GrossSales × Discount
+NetSales       = GrossSales - DiscountAmount
 ```
 
-### etl_dim_category.py
-استخراج و Full Refresh جدول DimCategory.
+محاسبات مالی با Decimal و rounding مناسب انجام می‌شوند.
 
-### etl_dimsupplier_postgres.py
-استخراج و بارگذاری DimSupplier.
+## 6. Dimensionهای ClickHouse و SCD Type 2
+DAGها:
+`etl_dimgeography_clickhouse.py`, `etl_dimcustomer_clickhouse.py`, `etl_dimcategory_clickhouse.py`, `etl_dimproduct_clickhouse.py`, `etl_dimsupplier_clickhouse.py`, `etl_dimdate_clickhouse.py`, `etl_dimemployee_clickhouse.py`
 
-### etl_dim_date.py
-ساخت و بارگذاری DimDate و فراهم کردن DateKey.
-
-## 5. PostgreSQL FactSales
-
-### etl_fact_sales.py
-
-Orders و Order Details را با Dimensionها ترکیب کرده و FactSales را تولید می‌کند.
-
-```text
-Orders + Order Details
-        │
-        ├── Customer Lookup
-        ├── Employee Lookup
-        ├── Product Lookup
-        ├── Geography Lookup
-        └── Date Lookup
-                │
-                ▼
-            FactSales
-```
-
-محاسبات مالی:
-
-```text
-GrossSales      = UnitPrice × Quantity
-DiscountAmount  = GrossSales × Discount
-NetSales        = GrossSales - DiscountAmount
-```
-
-مقادیر مالی با Decimal و rounding مناسب محاسبه می‌شوند.
-
-## 6. ClickHouse Dimensions
-
-DAGهای زیر مسئول انتقال Dimensionها به ClickHouse هستند:
-
-- etl_dimgeography_clickhouse.py
-- etl_dimcustomer_clickhouse.py
-- etl_dimcategory_clickhouse.py
-- etl_dimproduct_clickhouse.py
-- etl_dimsupplier_clickhouse.py
-- etl_dimdate_clickhouse.py
-- etl_dimemployee_clickhouse.py
-
-این DAGها از PySpark استفاده می‌کنند.
-
-الگوی SCD Type 2:
-
+الگوی SCD2:
 ```text
 Business Key
-    │
-    ├── Version 1  IsCurrent = 0
-    │
-    └── Version 2  IsCurrent = 1
+ ├─ Version 1 / IsCurrent=0 / EndDate=زمان تغییر
+ └─ Version 2 / IsCurrent=1 / EndDate=NULL
 ```
 
-رکورد قدیمی بسته شده و رکورد جدید با Version جدید ایجاد می‌شود. DAGها با `max_active_runs=1` از اجرای همزمان جلوگیری می‌کنند.
+Dimensionها با `ReplacingMergeTree(Version)` و DAGهای دارای `max_active_runs=1` اجرا می‌شوند.
 
-## 7. ClickHouse FactSales
+## 7. FactSales در ClickHouse
+`etl_factsales_clickhouse.py`، FactSales را از PostgreSQL منتقل، baseline را آماده و تعداد رکوردها و مقادیر مالی را Validation می‌کند.
 
-### etl_factsales_clickhouse.py
+## 8. SQL Server CDC
+CDC برای `Orders` و `Order Details` فعال و تست شده است.
 
-FactSales را از PostgreSQL به ClickHouse منتقل می‌کند، baseline را آماده می‌کند و validation تعداد رکوردها و مقادیر مالی را انجام می‌دهد.
+State اصلی:
+`ETL_Settings.dbo.cdc_state`
 
-## 8. CDC
-
-برای Orders و Order Details، CDC در SQL Server فعال است.
-
-State اصلی SQL Server در:
-
-```text
-ETL_Settings.dbo.cdc_state
-```
-
-قرار دارد و شامل:
-
-- TableName
-- CaptureInstance
-- LastProcessedLSN
-- LastProcessedAt
-
-است.
+ستون‌ها:
+`TableName`, `CaptureInstance`, `LastProcessedLSN`, `LastProcessedAt`
 
 ## 9. DAGهای CDC
-
-### etl_cdc_fact_sales.py
-
-Changeهای Orders و Order Details را از SQL Server CDC استخراج کرده و به لایه CDC Raw منتقل می‌کند.
-
-Schedule:
-
-```text
-*/30 * * * *
-```
-
-### etl_cdc_clean.py
-
-Raw CDC را پاک‌سازی و استاندارد کرده و برای Apply آماده می‌کند.
-
-### etl_cdc_apply_fact_sales.py
-
-Changeها را روی ClickHouse FactSales اعمال می‌کند:
+- `etl_cdc_fact_sales.py`: استخراج Changeهای Orders و Order Details و انتقال به Raw.
+- `etl_cdc_clean.py`: پاکسازی و استانداردسازی Raw.
+- `etl_cdc_apply_fact_sales.py`: اعمال Changeها در ClickHouse.
 
 ```text
 INSERT → Insert new row
@@ -199,185 +106,138 @@ UPDATE → Close old version + Insert new version
 DELETE → Tombstone
 ```
 
-برای Idempotency و checkpoint از LSN، SeqVal و Source Table استفاده می‌شود.
+Checkpoint، LSN، SeqVal، Source و Idempotency برای کنترل پردازش استفاده می‌شوند. State نهایی در `CDC_FactSales_State` نگهداری می‌شود.
 
-State نهایی در:
-
-```text
-CDC_FactSales_State
-```
-
-نگهداری می‌شود.
+Schedule CDC: `*/30 * * * *`
 
 ## 10. Master DAG
+`northwind_master_etl.py`
 
-### northwind_master_etl.py
+Schedule: `0 22 * * *` — هر روز ساعت 22:00.
 
-Master DAG مسئول orchestration بارگذاری شبانه است.
-
-Schedule:
-
-```text
-0 22 * * *
-```
-
-دارای 17 Task است.
-
-Dependencyهای مهم:
-
-```text
-DimGeography → DimCustomer
-
-DimCategory + DimSupplier → DimProduct
-
-All PostgreSQL Dimensions → PostgreSQL FactSales
-
-PostgreSQL Dimensions → Corresponding ClickHouse Dimensions
-
-All ClickHouse Dimensions + PostgreSQL FactSales
-                         ↓
-                  ClickHouse FactSales
-```
-
-ترتیب کلی:
-
+Master دارای 17 Task است و ترتیب کلی آن:
 ```text
 Cleanup FactSales
-       ↓
+      ↓
 PostgreSQL Dimensions
-       ↓
+      ↓
 PostgreSQL FactSales
-       ↓
+      ↓
 ClickHouse Dimensions
-       ↓
+      ↓
 ClickHouse FactSales
 ```
 
-CDC در Master DAG قرار ندارد و مستقل اجرا می‌شود.
+CDC در Master قرار ندارد و مستقل اجرا می‌شود.
 
-## 11. Cleanup DAG
-
-### etl_cleanup_fact_sales.py
-
-قبل از Full Load، FactSales را پاک‌سازی می‌کند تا baseline قبلی باعث duplicate نشود.
+## 11. Cleanup
+`etl_cleanup_fact_sales.py` قبل از Full Load FactSales وضعیت قبلی را پاکسازی می‌کند تا baseline قبلی باعث duplicate نشود.
 
 ## 12. زمان‌بندی
-
-| Pipeline | Schedule |
+| فرآیند | زمان‌بندی |
 |---|---|
-| Master ETL | هر روز ساعت 22:00 |
-| CDC FactSales | هر 30 دقیقه |
-| Grafana | Auto Refresh هر 5 دقیقه |
+| Master ETL | هر روز 22:00 |
+| FactSales CDC | هر 30 دقیقه |
+| Grafana Auto Refresh | هر 5 دقیقه |
 
-## 13. Grafana
+## 13. Grafana و چهار Dashboard
 
-Grafana به ClickHouse متصل است.
+Grafana به ClickHouse و Database `northwind_dw` متصل است. هر چهار Dashboard با Auto Refresh پنج‌دقیقه‌ای تنظیم شده‌اند.
 
-Database:
+## 13.1 Northwind - Sales Overview
+**پنل‌ها**
+- **Total Net Sales:** مجموع NetSales.
+- **Gross Sales:** فروش ناخالص.
+- **Discount Amount:** مجموع تخفیف.
+- **Total Orders:** تعداد سفارش‌های یکتا.
 
-```text
-northwind_dw
-```
+در Screenshot فعلی KPIها حدوداً Net Sales=1,265,755، Gross Sales=1,354,420، Discount Amount=88,666 و Total Orders=830 هستند.
 
-چهار Dashboard اصلی:
+![Sales Overview](grafana/01_sales_overview.png)
 
-### Northwind - Sales Overview
-- Total Net Sales
-- Gross Sales
-- Discount Amount
-- Total Orders
+## 13.2 Northwind - Sales Analysis
+- **Sales Over Time:** روند NetSales در زمان؛ بازه Screenshot از 1996-07-04 تا 1998-05-06.
+- **Gross Sales vs Net Sales:** مقایسه فروش ناخالص و خالص.
+- **Discount Trend:** روند DiscountAmount.
+- **Sales by Quarter:** مقایسه فروش خالص فصلی.
 
-### Northwind - Sales Analysis
-- Sales Over Time
-- Gross vs Net Sales
-- Discount Trend
-- Sales by Quarter
+مقادیر قابل مشاهده Sales by Quarter:
+| Quarter | Net Sales |
+|---|---:|
+| 1996-Q3 | 79,690 |
+| 1996-Q4 | 128,355 |
+| 1997-Q1 | 138,289 |
+| 1997-Q2 | 143,177 |
+| 1997-Q3 | 153,938 |
+| 1997-Q4 | 181,681 |
+| 1998-Q1 | 298,491 |
+| 1998-Q2 | 142,132 |
 
-### Northwind - Product & Customer Analysis
-- Sales by Category
-- Top 10 Products
-- Sales by Country
-- Top 10 Customers
+![Sales Analysis](grafana/02_sales_analysis.png)
 
-### Northwind - Employee & Operations Analysis
-- Sales by Employee
-- Orders by Employee
-- Freight by Employee
-- Average Order Value
+## 13.3 Northwind - Product & Customer Analysis
+- **Sales by Category:** فروش به تفکیک Category.
+- **Top 10 Products by Net Sales:** ده محصول برتر.
+- **Sales by Country:** فروش بر اساس کشور/جغرافیا.
+- **Top 10 Customers by Net Sales:** ده مشتری برتر.
 
-تمام Dashboardها باید با Refresh Interval برابر `5m` تنظیم شوند.
+در Screenshot محصولاتی مانند Côte de Blaye، Thüringer Rostbratwurst و Raclette Courdavault در رتبه‌های بالاتر دیده می‌شوند و کشورهایی مانند USA و Germany سهم بالاتری دارند.
 
-## 14. Validation
+> عنوان پنل اول در Screenshot به شکل `New Sales by Categorypanel` دیده می‌شود؛ این یک مسئله نام‌گذاری عنوان پنل است و محتوای نمودار مربوط به Sales by Category است.
 
-Validationهای انجام‌شده شامل:
+![Product & Customer Analysis](grafana/03_product_customer_analysis.png)
 
-- تعداد رکوردهای FactSales
-- تعداد Orders و Products
-- GrossSales
-- DiscountAmount
-- NetSales
-- AllocatedFreight
-- consistency محاسبات مالی
-- CDC UPDATE
-- CDC DELETE
-- CDC Idempotency
-- CDC Tombstone
-- تطبیق PostgreSQL و ClickHouse
+## 13.4 Northwind - Employee & Operations Analysis
+- **Sales by Employee:** مقایسه NetSales کارکنان.
+- **Orders by Employee:** تعداد سفارش هر Employee.
+- **Freight by Employee:** Freight تخصیص‌یافته برای هر Employee.
+- **Average Order Value:** میانگین ارزش سفارش.
 
-پس از تست CDC، مقادیر منطقی نهایی:
+در Screenshot فعلی Margaret Peacock با 156 سفارش، Janet Leverling با 127 و Nancy Davolio با 123 سفارش در رتبه‌های بالاتر هستند. مقدار Average Order Value برابر 1325 نمایش داده می‌شود.
 
-```text
-Rows               = 2154
-Orders             = 830
-Products           = 77
-GrossSales         = 1354420.39
-DiscountAmount     = 88665.82
-NetSales           = 1265754.57
-AllocatedFreight   = 64932.60
-Calculation Errors = 0
-```
+![Employee & Operations Analysis](grafana/04_employee_operations_analysis.png)
 
-## 15. Docker
+## 14. Validation نهایی
+Validation شامل تعداد رکوردهای FactSales، Orders، Products، GrossSales، DiscountAmount، NetSales، AllocatedFreight، Financial Consistency، CDC UPDATE، CDC DELETE، CDC Idempotency، CDC Tombstone و تطبیق PostgreSQL و ClickHouse بوده است.
 
-سرویس‌های اصلی:
+| Metric | مقدار |
+|---|---:|
+| Current FactSales Rows | 2,154 |
+| Orders | 830 |
+| Products | 77 |
+| GrossSales | 1,354,420.39 |
+| DiscountAmount | 88,665.82 |
+| NetSales | 1,265,754.57 |
+| AllocatedFreight | 64,932.60 |
+| Calculation Errors | 0 |
 
-```text
-northwind-postgres
-northwind-clickhouse
-northwind-airflow-...
-northwind-redis
-northwind-grafana
-northwind-sqlserver
-```
+## 15. تست‌های CDC
+- UPDATE در Order Details با موفقیت منتقل شد.
+- UPDATE در Orders و تغییر Freight با موفقیت منتقل شد.
+- DELETE در Order Details به‌صورت Tombstone مدیریت شد.
+- Idempotency تست و تأیید شد.
+- Versioning در Updateهای SCD2 تست شد.
 
-Network:
+## 16. Docker
+سرویس‌های اصلی: `northwind-sqlserver`, `northwind-postgres`, `northwind-clickhouse`, `northwind-grafana`, `northwind-redis` و سرویس‌های Airflow.
 
-```text
-northwind-network
-```
+Network: `northwind-network`
 
-Airflow با Python 3.10 و PySpark در Worker اجرا می‌شود.
+Airflow Worker با Python 3.10 و PySpark اجرا می‌شود.
 
-## 16. Airflow Connections و Secret Management
-
+## 17. Secret Management
 Credentialها داخل DAGها Hardcode نشده‌اند.
 
-Connectionهای اصلی:
-
+Connections اصلی:
 ```text
 northwind_postgres
 northwind_sqlserver
 clickhouse_northwind
 ```
 
-DAGها credential را از Airflow Connections دریافت می‌کنند.
+`.env` محلی نباید commit شود و `.env.example` فقط placeholderهایی مانند `CHANGE_ME` دارد.
 
-Credentialهای واقعی در `.env` محلی قرار دارند و `.env` در Git commit نمی‌شود.
-
-در repository فقط `.env.example` با مقادیر `CHANGE_ME` قرار دارد.
-
-## 17. ساختار Repository
-
+## 18. ساختار Repository
 ```text
 northwind-etl/
 ├── .env.example
@@ -389,87 +249,47 @@ northwind-etl/
 │   ├── requirements.txt
 │   ├── dags/
 │   └── jars/
-└── spark/
-    └── jars/
+├── spark/
+│   └── jars/
+└── docs/
 ```
 
-## 18. Git
+## 19. Git
+Branch اصلی `main` است. Repository باید بدون Secret واقعی منتشر شود. `.env`، password واقعی و Fernet Key واقعی نباید در Git قرار گیرند.
 
-Repository پروژه روی GitHub قرار گرفته است.
-
-Branch اصلی:
-
+## 20. معماری نهایی
 ```text
-main
-```
+SQL Server Northwind
+        │ Daily Full Load
+        ▼
+PostgreSQL Staging
+        │ PySpark / SCD2
+        ▼
+ClickHouse DW
+        │
+        ▼
+Grafana Analytics
 
-اولین commit:
-
-```text
-87ae9c2 Initial Northwind ETL pipeline
-```
-
-Working tree پس از push اولیه clean بوده است.
-
-## 19. معماری نهایی
-
-```text
-                    ┌─────────────────────┐
-                    │ SQL Server Northwind│
-                    └──────────┬──────────┘
-                               │
-                         Daily Full Load
-                               │
-                               ▼
-                    ┌─────────────────────┐
-                    │ PostgreSQL Staging  │
-                    │ Dimensions          │
-                    │ FactSales           │
-                    └──────────┬──────────┘
-                               │
-                         PySpark / SCD2
-                               │
-                               ▼
-                    ┌─────────────────────┐
-                    │ ClickHouse DW       │
-                    │ Dimensions SCD2     │
-                    │ FactSales           │
-                    └──────────┬──────────┘
-                               │
-                               ▼
-                    ┌─────────────────────┐
-                    │ Grafana             │
-                    │ Analytics           │
-                    └─────────────────────┘
-
-
-CDC Path:
-
+CDC:
 SQL Server CDC
-      │
-      ▼
-CDC Raw
-      │
-      ▼
-CDC Clean
-      │
-      ▼
-CDC Apply
-      │
-      ▼
-ClickHouse FactSales
+ → CDC Raw
+ → CDC Clean
+ → CDC Apply
+ → ClickHouse FactSales
 ```
 
-## 20. وضعیت پروژه
-
+## 21. وضعیت نهایی
 - Docker architecture پیاده‌سازی شده است.
-- Airflow با PostgreSQL metadata database اجرا می‌شود.
+- Airflow با PostgreSQL Metadata DB اجرا می‌شود.
 - Python 3.10 و PySpark آماده هستند.
-- PostgreSQL Dimensions و FactSales پیاده‌سازی و validation شده‌اند.
-- ClickHouse Dimensions با SCD Type 2 پیاده‌سازی شده‌اند.
+- PostgreSQL Dimensions و FactSales Validation شده‌اند.
+- ClickHouse Dimensions با SCD Type 2 پیاده‌سازی و تست شده‌اند.
 - ClickHouse FactSales پیاده‌سازی شده است.
-- SQL Server CDC برای Orders و Order Details پیاده‌سازی و تست شده است.
-- Master DAG با موفقیت اجرا شده است.
-- Grafana به ClickHouse متصل و چهار Dashboard ایجاد شده است.
-- Secretها از DAGها خارج و به Airflow Connections منتقل شده‌اند.
-- Repository پروژه روی GitHub قرار گرفته است.
+- CDC برای Orders و Order Details تست شده است.
+- Master DAG با 17 Task موفق بوده است.
+- چهار Dashboard Grafana ایجاد و با Refresh پنج‌دقیقه‌ای تنظیم شده‌اند.
+- Secrets به Airflow Connections منتقل شده‌اند.
+- مستندات آماده انتشار در Git هستند.
+
+## 22. جمع‌بندی
+معماری نهایی پروژه یک Data Engineering Pipeline کامل به شکل **Source → Staging → Warehouse → CDC → Analytics** است که Full Load شبانه، SCD Type 2، CDC سی‌دقیقه‌ای، ClickHouse و Grafana را در یک محیط Dockerized یکپارچه می‌کند.
